@@ -1,0 +1,923 @@
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index 135d2ac..d0dba35 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -4,3 +4,6 @@ pytest==7.4.2
+ httpx==0.25.0
+ python-dotenv==1.0.0
+ requests==2.31.0
++python-jose[cryptography]==3.3.0
++passlib[bcrypt]==1.7.4
++python-multipart==0.0.6
+diff --git a/backend/src/api/auth.py b/backend/src/api/auth.py
+new file mode 100644
+index 0000000..54042a6
+--- /dev/null
++++ b/backend/src/api/auth.py
+@@ -0,0 +1,41 @@
++from fastapi import APIRouter, Depends, HTTPException, status
++from fastapi.security import OAuth2PasswordRequestForm
++from datetime import timedelta
++
++from backend.src.models.user import Token, User
++from backend.src.auth.utils import authenticate_user, create_access_token, ACCESS_TOKEN_EXPIRE_MINUTES
++from backend.src.auth.dependencies import get_current_active_user
++
++router = APIRouter(
++    prefix="/auth",
++    tags=["auth"],
++    responses={401: {"description": "Unauthorized"}},
++)
++
++@router.post("/token", response_model=Token)
++async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
++    """Login endpoint to get JWT token"""
++    # Authenticate the user
++    user = authenticate_user(form_data.username, form_data.password)
++    
++    if not user:
++        raise HTTPException(
++            status_code=status.HTTP_401_UNAUTHORIZED,
++            detail="Incorrect username or password",
++            headers={"WWW-Authenticate": "Bearer"},
++        )
++    
++    # Create access token
++    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
++    access_token = create_access_token(
++        data={"sub": user.username},
++        expires_delta=access_token_expires
++    )
++    
++    return {"access_token": access_token, "token_type": "bearer"}
++
++
++@router.get("/users/me", response_model=User)
++async def read_users_me(current_user: User = Depends(get_current_active_user)):
++    """Get current user information"""
++    return current_user 
+diff --git a/backend/src/api/weather.py b/backend/src/api/weather.py
+index 9c29514..289d0b8 100644
+--- a/backend/src/api/weather.py
++++ b/backend/src/api/weather.py
+@@ -4,6 +4,8 @@ from typing import Optional
+ from backend.src.models.weather import CurrentWeather, WeatherForecast, GeoLocation, AirQuality
+ from backend.src.services.weather_service import WeatherService
+ from backend.src.api.dependencies import get_weather_service
++from backend.src.models.user import User
++from backend.src.auth.dependencies import get_current_active_user
+ 
+ router = APIRouter(
+     prefix="/weather",
+@@ -11,7 +13,6 @@ router = APIRouter(
+     responses={404: {"description": "Not found"}},
+ )
+ 
+-
+ @router.get("/current", response_model=CurrentWeather)
+ async def get_current_weather(
+     city: Optional[str] = None,
+@@ -42,11 +43,13 @@ async def get_current_weather(
+ @router.get("/forecast", response_model=WeatherForecast)
+ async def get_weather_forecast(
+     city: str,
+-    weather_service: WeatherService = Depends(get_weather_service)
++    weather_service: WeatherService = Depends(get_weather_service),
++    current_user: User = Depends(get_current_active_user)
+ ):
+     """
+     Get 5-day weather forecast for a location.
+     Provide the city name.
++    Requires authentication. 
+     """
+     try:
+         return await weather_service.get_forecast_by_city(city)
+@@ -96,4 +99,4 @@ async def get_air_quality(
+     except ValueError as e:
+         raise HTTPException(status_code=404, detail=str(e))
+     except Exception as e:
+-        raise HTTPException(status_code=500, detail=f"Error fetching air quality data: {str(e)}") 
+\ No newline at end of file
++        raise HTTPException(status_code=500, detail=f"Error fetching air quality data: {str(e)}") 
+diff --git a/backend/src/auth/__init__.py b/backend/src/auth/__init__.py
+new file mode 100644
+index 0000000..4e94e41
+--- /dev/null
++++ b/backend/src/auth/__init__.py
+@@ -0,0 +1,17 @@
++from backend.src.auth.utils import (
++    verify_password,
++    get_password_hash,
++    authenticate_user,
++    create_access_token,
++    verify_token,
++    get_user,
++)
++
++__all__ = [
++    "verify_password",
++    "get_password_hash",
++    "authenticate_user",
++    "create_access_token",
++    "verify_token",
++    "get_user",
++] 
+\ No newline at end of file
+diff --git a/backend/src/auth/dependencies.py b/backend/src/auth/dependencies.py
+new file mode 100644
+index 0000000..b6f773b
+--- /dev/null
++++ b/backend/src/auth/dependencies.py
+@@ -0,0 +1,45 @@
++from fastapi import Depends, HTTPException, status
++from fastapi.security import OAuth2PasswordBearer
++from typing import Optional
++
++from backend.src.models.user import User, TokenData
++from backend.src.auth.utils import verify_token, get_user
++
++# OAuth2 scheme for token extraction
++oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
++
++
++async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
++    """Get the current user from JWT token"""
++    token_data = verify_token(token)
++    user = get_user(username=token_data.username)
++    
++    if user is None:
++        raise HTTPException(
++            status_code=status.HTTP_401_UNAUTHORIZED,
++            detail="User not found",
++            headers={"WWW-Authenticate": "Bearer"},
++        )
++    
++    return user
++
++
++async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
++    """Get the current active user"""
++    if current_user.disabled:
++        raise HTTPException(status_code=400, detail="Inactive user")
++    
++    return current_user
++
++
++def get_optional_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> Optional[User]:
++    """Get the current user if a token is provided (optional authentication)"""
++    if token is None:
++        return None
++    
++    try:
++        token_data = verify_token(token)
++        user = get_user(username=token_data.username)
++        return user
++    except HTTPException:
++        return None 
+\ No newline at end of file
+diff --git a/backend/src/auth/utils.py b/backend/src/auth/utils.py
+new file mode 100644
+index 0000000..c6eec8c
+--- /dev/null
++++ b/backend/src/auth/utils.py
+@@ -0,0 +1,104 @@
++import os
++from datetime import datetime, timedelta
++from typing import Optional, Dict, Any
++from jose import jwt, JWTError
++from passlib.context import CryptContext
++from fastapi import HTTPException, status
++
++from backend.src.models.user import TokenData, User, UserInDB
++
++# Get secret key from environment or use a default one
++SECRET_KEY = os.getenv("JWT_SECRET_KEY", "3b3350a35ad3e28cc8fde03fd11657c04b70ffd39d7caf53a1f1ea6c3d4454d9")
++ALGORITHM = "HS256"
++ACCESS_TOKEN_EXPIRE_MINUTES = 30
++
++# Password context for hashing
++pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
++
++# Mock user database - replace with an actual database in production
++fake_users_db = {
++    "johndoe": {
++        "id": 1,
++        "username": "johndoe",
++        "full_name": "John Doe",
++        "email": "johndoe@example.com",
++        "hashed_password": pwd_context.hash("secret"),
++        "disabled": False,
++    },
++    "alice": {
++        "id": 2,
++        "username": "alice",
++        "full_name": "Alice Wonderland",
++        "email": "alice@example.com",
++        "hashed_password": pwd_context.hash("secret123"),
++        "disabled": False,
++    },
++}
++
++
++def verify_password(plain_password: str, hashed_password: str) -> bool:
++    """Verify a password against a hash"""
++    return pwd_context.verify(plain_password, hashed_password)
++
++
++def get_password_hash(password: str) -> str:
++    """Hash a password"""
++    return pwd_context.hash(password)
++
++
++def get_user(username: str) -> Optional[UserInDB]:
++    """Get a user from the database"""
++    if username in fake_users_db:
++        user_dict = fake_users_db[username]
++        return UserInDB(**user_dict)
++    return None
++
++
++def authenticate_user(username: str, password: str) -> Optional[User]:
++    """Authenticate a user"""
++    user = get_user(username)
++    if not user:
++        return None
++    if not verify_password(password, user.hashed_password):
++        return None
++    return user
++
++
++def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
++    """Create a JWT access token"""
++    to_encode = data.copy()
++    
++    # Set expiration time
++    if expires_delta:
++        expire = datetime.utcnow() + expires_delta
++    else:
++        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
++    
++    to_encode.update({"exp": expire})
++    
++    # Create JWT token
++    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
++    return encoded_jwt
++
++
++def verify_token(token: str) -> TokenData:
++    """Verify a JWT token"""
++    credentials_exception = HTTPException(
++        status_code=status.HTTP_401_UNAUTHORIZED,
++        detail="Could not validate credentials",
++        headers={"WWW-Authenticate": "Bearer"},
++    )
++    
++    try:
++        # Decode JWT token
++        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
++        username: str = payload.get("sub")
++        
++        if username is None:
++            raise credentials_exception
++        
++        token_data = TokenData(username=username)
++        return token_data
++    
++    except JWTError:
++        raise credentials_exception 
+\ No newline at end of file
+diff --git a/backend/src/main.py b/backend/src/main.py
+index d79ad22..5288174 100644
+--- a/backend/src/main.py
++++ b/backend/src/main.py
+@@ -13,6 +13,7 @@ sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(
+ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
+ 
+ from backend.src.api.weather import router as weather_router
++from backend.src.api.auth import router as auth_router
+ 
+ # Create FastAPI app
+ app = FastAPI(
+@@ -32,6 +33,7 @@ app.add_middleware(
+ 
+ # Include routers
+ app.include_router(weather_router)
++app.include_router(auth_router)
+ 
+ @app.get("/")
+ async def root():
+diff --git a/backend/src/models/user.py b/backend/src/models/user.py
+new file mode 100644
+index 0000000..b3bc0ab
+--- /dev/null
++++ b/backend/src/models/user.py
+@@ -0,0 +1,39 @@
++from pydantic import BaseModel, Field, EmailStr
++from typing import Optional, List
++
++
++class Token(BaseModel):
++    """JWT token model"""
++    access_token: str
++    token_type: str
++
++
++class TokenData(BaseModel):
++    """JWT token data model"""
++    username: Optional[str] = None
++
++
++class UserBase(BaseModel):
++    """Base user model"""
++    username: str
++    email: Optional[str] = None
++    full_name: Optional[str] = None
++    disabled: Optional[bool] = None
++
++
++class UserCreate(UserBase):
++    """User creation model"""
++    password: str
++
++
++class User(UserBase):
++    """User model"""
++    id: Optional[int] = None
++
++    class Config:
++        from_attributes = True
++
++
++class UserInDB(User):
++    """User database model"""
++    hashed_password: str 
+\ No newline at end of file
+diff --git a/frontend/src/App.tsx b/frontend/src/App.tsx
+index f21ded1..f281d74 100644
+--- a/frontend/src/App.tsx
++++ b/frontend/src/App.tsx
+@@ -1,11 +1,13 @@
+-import React, { useState } from 'react';
++import React, { useState, useEffect } from 'react';
+ import styled from 'styled-components';
+ import { useQuery } from 'react-query';
+ import { weatherApi } from './services/api';
++import { authService } from './services/auth';
+ import SearchBar from './components/SearchBar';
+ import WeatherCard from './components/WeatherCard';
+ import ForecastCard from './components/ForecastCard';
+ import WeatherMap from './components/WeatherMap';
++import Login from './components/Login';
+ import { CurrentWeather, WeatherForecast, GeoLocation } from './types/weather';
+ 
+ const AppContainer = styled.div`
+@@ -17,6 +19,9 @@ const AppContainer = styled.div`
+ const Header = styled.header`
+   text-align: center;
+   margin-bottom: 2rem;
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
+ `;
+ 
+ const Title = styled.h1`
+@@ -28,6 +33,35 @@ const Subtitle = styled.p`
+   color: #666;
+ `;
+ 
++const HeaderContent = styled.div`
++  text-align: center;
++  flex-grow: 1;
++`;
++
++const AuthButton = styled.button`
++  padding: 0.5rem 1rem;
++  background-color: var(--primary-color);
++  color: white;
++  border: none;
++  border-radius: var(--border-radius);
++  cursor: pointer;
++  transition: background-color 0.2s;
++
++  &:hover {
++    background-color: var(--primary-color-dark);
++  }
++`;
++
++const UserInfo = styled.div`
++  display: flex;
++  align-items: center;
++  gap: 0.5rem;
++`;
++
++const Username = styled.span`
++  font-weight: bold;
++`;
++
+ const Grid = styled.div`
+   display: grid;
+   grid-template-columns: 1fr;
+@@ -46,6 +80,14 @@ const SectionTitle = styled.h2`
+   color: var(--text-color);
+   margin-bottom: 1rem;
+   font-size: 1.5rem;
++  display: flex;
++  justify-content: space-between;
++  align-items: center;
++`;
++
++const LockedMessage = styled.span`
++  font-size: 0.875rem;
++  color: var(--danger-color);
+ `;
+ 
+ const ForecastContainer = styled.div`
+@@ -73,6 +115,30 @@ const ErrorMessage = styled.div`
+ const App: React.FC = () => {
+   const [searchCity, setSearchCity] = useState<string>('');
+   const [selectedLocation, setSelectedLocation] = useState<GeoLocation | null>(null);
++  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
++  const [showLogin, setShowLogin] = useState<boolean>(false);
++  const [username, setUsername] = useState<string | null>(null);
++  
++  // Check if user is already authenticated on load
++  useEffect(() => {
++    const checkAuth = async () => {
++      const isAuth = authService.isAuthenticated();
++      setIsAuthenticated(isAuth);
++      
++      if (isAuth) {
++        try {
++          const user = await authService.getCurrentUser();
++          setUsername(user.username);
++        } catch (error) {
++          console.error('Failed to get user info:', error);
++          authService.logout();
++          setIsAuthenticated(false);
++        }
++      }
++    };
++    
++    checkAuth();
++  }, []);
+   
+   // Use React Query for API calls
+   const { 
+@@ -97,7 +163,8 @@ const App: React.FC = () => {
+   
+   const { 
+     data: forecast,
+-    isLoading: isLoadingForecast
++    isLoading: isLoadingForecast,
++    error: forecastError
+   } = useQuery(
+     ['forecast', searchCity],
+     () => {
+@@ -106,7 +173,14 @@ const App: React.FC = () => {
+       }
+       return null;
+     },
+-    { enabled: !!searchCity }
++    { 
++      enabled: !!searchCity && isAuthenticated,
++      retry: (failureCount, error: any) => {
++        // Don't retry on 401 (unauthorized)
++        if (error?.response?.status === 401) return false;
++        return failureCount < 3;
++      }
++    }
+   );
+   
+   const handleSearch = (city: string) => {
+@@ -118,61 +192,113 @@ const App: React.FC = () => {
+     setSelectedLocation(location);
+     setSearchCity('');
+   };
++  
++  const handleLogin = () => {
++    setShowLogin(true);
++  };
++  
++  const handleLogout = () => {
++    authService.logout();
++    setIsAuthenticated(false);
++    setUsername(null);
++  };
++  
++  const handleLoginSuccess = async () => {
++    setShowLogin(false);
++    setIsAuthenticated(true);
++    
++    try {
++      const user = await authService.getCurrentUser();
++      setUsername(user.username);
++    } catch (error) {
++      console.error('Failed to get user info:', error);
++    }
++  };
+ 
+   const isLoading = isLoadingWeather || isLoadingForecast;
+   const hasError = weatherError !== null;
++  const hasForecastError = forecastError !== null && !isAuthenticated;
+   const hasData = currentWeather !== null && !isLoading && !hasError;
+   
+   return (
+     <AppContainer>
+       <Header>
+-        <Title>Weather App</Title>
+-        <Subtitle>Get current weather and forecasts for any location</Subtitle>
++        <HeaderContent>
++          <Title>Weather App</Title>
++          <Subtitle>Get current weather and forecasts for any location</Subtitle>
++        </HeaderContent>
++        
++        {isAuthenticated ? (
++          <UserInfo>
++            <Username>Welcome, {username}</Username>
++            <AuthButton onClick={handleLogout}>Logout</AuthButton>
++          </UserInfo>
++        ) : (
++          <AuthButton onClick={handleLogin}>Login</AuthButton>
++        )}
+       </Header>
+       
+-      <Grid>
+-        <div>
++      {showLogin ? (
++        <Login onLoginSuccess={handleLoginSuccess} />
++      ) : (
++        <>
++          <Grid>
++            <div>
++              <Section>
++                <SectionTitle>Search for a location</SectionTitle>
++                <SearchBar onSearch={handleSearch} />
++              </Section>
++              
++              {hasData && currentWeather && (
++                <Section>
++                  <SectionTitle>Current Weather</SectionTitle>
++                  <WeatherCard weather={currentWeather as CurrentWeather} />
++                </Section>
++              )}
++            </div>
++            
++            <div>
++              <Section>
++                <SectionTitle>Interactive Map</SectionTitle>
++                <WeatherMap 
++                  onLocationSelected={handleMapLocationSelected}
++                  center={currentWeather ? [currentWeather.lat, currentWeather.lon] : undefined}
++                />
++              </Section>
++            </div>
++          </Grid>
++          
+           <Section>
+-            <SectionTitle>Search for a location</SectionTitle>
+-            <SearchBar onSearch={handleSearch} />
++            <SectionTitle>
++              5-Day Forecast
++              {!isAuthenticated && <LockedMessage>Login required for forecast data</LockedMessage>}
++            </SectionTitle>
++            
++            {!isAuthenticated ? (
++              <ErrorMessage>Please login to access forecast data</ErrorMessage>
++            ) : hasData && forecast ? (
++              <ForecastContainer>
++                {forecast.forecast.map((item, index) => (
++                  <ForecastCard key={index} forecast={item} />
++                ))}
++              </ForecastContainer>
++            ) : null}
+           </Section>
+           
+-          {hasData && currentWeather && (
+-            <Section>
+-              <SectionTitle>Current Weather</SectionTitle>
+-              <WeatherCard weather={currentWeather as CurrentWeather} />
+-            </Section>
++          {isLoading && <LoadingMessage>Loading weather data...</LoadingMessage>}
++          
++          {hasError && (
++            <ErrorMessage>
++              Error fetching weather data. Please check the city name and try again.
++            </ErrorMessage>
+           )}
+-        </div>
+-        
+-        <div>
+-          <Section>
+-            <SectionTitle>Interactive Map</SectionTitle>
+-            <WeatherMap 
+-              onLocationSelected={handleMapLocationSelected}
+-              center={currentWeather ? [currentWeather.lat, currentWeather.lon] : undefined}
+-            />
+-          </Section>
+-        </div>
+-      </Grid>
+-      
+-      {hasData && forecast && (
+-        <Section>
+-          <SectionTitle>5-Day Forecast</SectionTitle>
+-          <ForecastContainer>
+-            {forecast.forecast.map((item, index) => (
+-              <ForecastCard key={index} forecast={item} />
+-            ))}
+-          </ForecastContainer>
+-        </Section>
+-      )}
+-      
+-      {isLoading && <LoadingMessage>Loading weather data...</LoadingMessage>}
+-      
+-      {hasError && (
+-        <ErrorMessage>
+-          Error fetching weather data. Please check the city name and try again.
+-        </ErrorMessage>
++          
++          {hasForecastError && isAuthenticated && (
++            <ErrorMessage>
++              Error fetching forecast data. Please try again later.
++            </ErrorMessage>
++          )}
++        </>
+       )}
+     </AppContainer>
+   );
+diff --git a/frontend/src/components/Login.tsx b/frontend/src/components/Login.tsx
+new file mode 100644
+index 0000000..e399079
+--- /dev/null
++++ b/frontend/src/components/Login.tsx
+@@ -0,0 +1,145 @@
++import React, { useState } from 'react';
++import styled from 'styled-components';
++import { authService } from '../services/auth';
++
++interface LoginProps {
++  onLoginSuccess: () => void;
++}
++
++const LoginContainer = styled.div`
++  max-width: 400px;
++  margin: 2rem auto;
++  padding: 2rem;
++  background-color: white;
++  border-radius: var(--border-radius);
++  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
++`;
++
++const Title = styled.h2`
++  color: var(--primary-color);
++  margin-bottom: 1.5rem;
++  text-align: center;
++`;
++
++const Form = styled.form`
++  display: flex;
++  flex-direction: column;
++  gap: 1rem;
++`;
++
++const FormGroup = styled.div`
++  display: flex;
++  flex-direction: column;
++  gap: 0.5rem;
++`;
++
++const Label = styled.label`
++  font-weight: bold;
++  color: var(--text-color);
++`;
++
++const Input = styled.input`
++  padding: 0.75rem;
++  border: 1px solid #ddd;
++  border-radius: var(--border-radius);
++  font-size: 1rem;
++
++  &:focus {
++    outline: none;
++    border-color: var(--primary-color);
++    box-shadow: 0 0 0 2px rgba(var(--primary-color-rgb), 0.2);
++  }
++`;
++
++const Button = styled.button`
++  padding: 0.75rem 1rem;
++  background-color: var(--primary-color);
++  color: white;
++  border: none;
++  border-radius: var(--border-radius);
++  font-size: 1rem;
++  cursor: pointer;
++  transition: background-color 0.2s;
++  margin-top: 1rem;
++
++  &:hover {
++    background-color: var(--primary-color-dark);
++  }
++
++  &:disabled {
++    background-color: #ccc;
++    cursor: not-allowed;
++  }
++`;
++
++const ErrorMessage = styled.div`
++  color: var(--danger-color);
++  font-size: 0.875rem;
++  margin-top: 1rem;
++  text-align: center;
++  padding: 0.5rem;
++  background-color: rgba(231, 76, 60, 0.1);
++  border-radius: var(--border-radius);
++`;
++
++const Login: React.FC<LoginProps> = ({ onLoginSuccess }) => {
++  const [username, setUsername] = useState('');
++  const [password, setPassword] = useState('');
++  const [error, setError] = useState<string | null>(null);
++  const [isLoading, setIsLoading] = useState(false);
++
++  const handleSubmit = async (e: React.FormEvent) => {
++    e.preventDefault();
++    setError(null);
++    setIsLoading(true);
++
++    try {
++      await authService.login(username, password);
++      onLoginSuccess();
++    } catch (err) {
++      console.error('Login error:', err);
++      setError('Invalid username or password. Please try again.');
++    } finally {
++      setIsLoading(false);
++    }
++  };
++
++  return (
++    <LoginContainer>
++      <Title>Login</Title>
++      <Form onSubmit={handleSubmit}>
++        <FormGroup>
++          <Label htmlFor="username">Username</Label>
++          <Input
++            id="username"
++            type="text"
++            value={username}
++            onChange={(e) => setUsername(e.target.value)}
++            required
++          />
++        </FormGroup>
++        <FormGroup>
++          <Label htmlFor="password">Password</Label>
++          <Input
++            id="password"
++            type="password"
++            value={password}
++            onChange={(e) => setPassword(e.target.value)}
++            required
++          />
++        </FormGroup>
++        {error && <ErrorMessage>{error}</ErrorMessage>}
++        <Button type="submit" disabled={isLoading}>
++          {isLoading ? 'Logging in...' : 'Login'}
++        </Button>
++      </Form>
++      <div style={{ marginTop: '1rem', textAlign: 'center', fontSize: '0.875rem' }}>
++        <p>Demo accounts:</p>
++        <p>Username: johndoe / Password: secret</p>
++        <p>Username: alice / Password: secret123</p>
++      </div>
++    </LoginContainer>
++  );
++};
++
++export default Login; 
+\ No newline at end of file
+diff --git a/frontend/src/services/api.ts b/frontend/src/services/api.ts
+index 372d552..cba001c 100644
+--- a/frontend/src/services/api.ts
++++ b/frontend/src/services/api.ts
+@@ -4,7 +4,7 @@ import { CurrentWeather, WeatherForecast, GeoLocation } from '../types/weather';
+ const API_URL = process.env.REACT_APP_API_URL || 'https://localhost:8000';
+ 
+ // Create axios instance with base URL
+-const api = axios.create({
++export const api = axios.create({
+   baseURL: API_URL,
+   headers: {
+     'Content-Type': 'application/json',
+diff --git a/frontend/src/services/auth.ts b/frontend/src/services/auth.ts
+new file mode 100644
+index 0000000..8aef5f6
+--- /dev/null
++++ b/frontend/src/services/auth.ts
+@@ -0,0 +1,105 @@
++import axios, { InternalAxiosRequestConfig } from 'axios';
++import { api } from './api';
++
++// User types
++export interface User {
++  username: string;
++  email?: string;
++  full_name?: string;
++  disabled?: boolean;
++}
++
++export interface LoginRequest {
++  username: string;
++  password: string;
++}
++
++export interface LoginResponse {
++  access_token: string;
++  token_type: string;
++}
++
++// Create a separate instance for auth requests that handles form data
++const authApi = axios.create({
++  baseURL: api.defaults.baseURL,
++  headers: {
++    'Content-Type': 'application/x-www-form-urlencoded',
++  },
++});
++
++// Authentication service
++export const authService = {
++  /**
++   * Login with username and password to get JWT token
++   */
++  login: async (username: string, password: string): Promise<LoginResponse> => {
++    // Convert data to form URL encoded format
++    const formData = new URLSearchParams();
++    formData.append('username', username);
++    formData.append('password', password);
++    
++    const response = await authApi.post<LoginResponse>(
++      '/auth/token',
++      formData.toString()
++    );
++    
++    // Store token in localStorage
++    localStorage.setItem('token', response.data.access_token);
++    
++    return response.data;
++  },
++  
++  /**
++   * Get current user information
++   */
++  getCurrentUser: async (): Promise<User> => {
++    const token = localStorage.getItem('token');
++    
++    if (!token) {
++      throw new Error('No authentication token found');
++    }
++    
++    const response = await api.get<User>('/auth/users/me', {
++      headers: {
++        Authorization: `Bearer ${token}`
++      }
++    });
++    
++    return response.data;
++  },
++  
++  /**
++   * Logout by removing the token
++   */
++  logout: (): void => {
++    localStorage.removeItem('token');
++  },
++  
++  /**
++   * Check if user is authenticated
++   */
++  isAuthenticated: (): boolean => {
++    return !!localStorage.getItem('token');
++  },
++  
++  /**
++   * Get the authentication token
++   */
++  getToken: (): string | null => {
++    return localStorage.getItem('token');
++  },
++};
++
++// Axios interceptor to add the token to every request
++api.interceptors.request.use(
++  (config: InternalAxiosRequestConfig) => {
++    const token = localStorage.getItem('token');
++    
++    if (token && config.headers) {
++      config.headers.Authorization = `Bearer ${token}`;
++    }
++    
++    return config;
++  },
++  (error: unknown) => Promise.reject(error)
++); 
+\ No newline at end of file

@@ -1,0 +1,12 @@
+{
+  "name": "open-weather-app",
+  "version": "1.0.0",
+  "dependencies": {
+    "@craco/craco": "^7.1.0"
+  },
+  "scripts": {
+    "start": "craco start",
+    "build": "craco build",
+    "test": "craco test"
+  }
+}
