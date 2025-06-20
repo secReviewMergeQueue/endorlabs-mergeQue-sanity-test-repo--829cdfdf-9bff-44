@@ -4,13 +4,14 @@ from typing import Optional
 from backend.src.models.weather import CurrentWeather, WeatherForecast, GeoLocation, AirQuality
 from backend.src.services.weather_service import WeatherService
 from backend.src.api.dependencies import get_weather_service
+from backend.src.models.user import User
+from backend.src.auth.dependencies import get_current_active_user
 
 router = APIRouter(
     prefix="/weather",
     tags=["weather"],
     responses={404: {"description": "Not found"}},
 )
-
 
 @router.get("/current", response_model=CurrentWeather)
 async def get_current_weather(
@@ -42,11 +43,13 @@ async def get_current_weather(
 @router.get("/forecast", response_model=WeatherForecast)
 async def get_weather_forecast(
     city: str,
-    weather_service: WeatherService = Depends(get_weather_service)
+    weather_service: WeatherService = Depends(get_weather_service),
+    current_user: User = Depends(get_current_active_user)
 ):
     """
     Get 5-day weather forecast for a location.
     Provide the city name.
+    Requires authentication. 
     """
     try:
         return await weather_service.get_forecast_by_city(city)

@@ -13,6 +13,7 @@ sys.path.append(os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
 
 from backend.src.api.weather import router as weather_router
+from backend.src.api.auth import router as auth_router
 
 # Create FastAPI app
 app = FastAPI(
@@ -32,6 +33,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(weather_router)
+app.include_router(auth_router)
 
 @app.get("/")
 async def root():
